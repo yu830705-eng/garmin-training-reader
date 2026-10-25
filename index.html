@@ -1,0 +1,368 @@
+
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Garmin 訓練截圖整理器</title>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #10131a;
+      color: #f1f5f9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6;
+    }
+    main { max-width: 900px; margin: auto; padding: 28px 18px 60px; }
+    h1 { font-size: 28px; margin-bottom: 6px; }
+    .muted { color: #9ca8b8; }
+    .panel {
+      background: #191f2b;
+      border: 1px solid #30394a;
+      border-radius: 14px;
+      padding: 18px;
+      margin-top: 18px;
+    }
+    button, .upload {
+      display: inline-block;
+      border: 0;
+      border-radius: 9px;
+      padding: 11px 15px;
+      background: #7dd3fc;
+      color: #0c1724;
+      font-weight: 700;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.secondary { background: #30394a; color: #f1f5f9; }
+    button.danger { background: #4a2930; color: #fecaca; }
+    input, select, textarea {
+      width: 100%;
+      background: #0f141d;
+      border: 1px solid #3a4558;
+      border-radius: 8px;
+      color: #f1f5f9;
+      padding: 10px;
+      font: inherit;
+      margin-top: 6px;
+    }
+    input[type="file"] { display: none; }
+    .upload { margin-right: 8px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .item {
+      border: 1px solid #30394a;
+      border-radius: 10px;
+      padding: 14px;
+      margin-top: 12px;
+    }
+    .item img { max-width: 100%; max-height: 260px; object-fit: contain; display: block; margin: 10px 0; }
+    .item-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .status { color: #7dd3fc; font-size: 13px; }
+    textarea { min-height: 130px; resize: vertical; }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: #0f141d;
+      padding: 14px;
+      border-radius: 8px;
+      border: 1px solid #30394a;
+      font: inherit;
+    }
+    .notice { font-size: 13px; color: #aab5c5; }
+    .progress { height: 6px; background: #30394a; border-radius: 6px; overflow: hidden; margin-top: 12px; }
+    .bar { height: 100%; width: 0; background: #7dd3fc; transition: width .2s; }
+    label.field { display: block; margin-top: 12px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Garmin 訓練截圖整理器</h1>
+  <p class="muted">將自行車、跑步、游泳的訓練截圖整理成可複製的結構化報告。</p>
+
+  <section class="panel">
+    <h2>1. 上傳截圖</h2>
+    <p class="notice">最多 20 張圖片。OCR 在你的瀏覽器中執行；首次使用需要載入辨識程式與語言資料。</p>
+    <label class="upload" for="files">選擇圖片</label>
+    <input id="files" type="file" accept="image/*" multiple>
+    <span id="count" class="muted">尚未選擇圖片</span>
+    <div class="actions">
+      <button id="runOCR">辨識所有圖片</button>
+      <button id="makeReport" class="secondary">產生報告</button>
+      <button id="clearAll" class="danger">清空全部</button>
+    </div>
+    <div class="progress"><div id="bar" class="bar"></div></div>
+    <p id="globalStatus" class="status">等待上傳圖片。</p>
+  </section>
+
+  <section class="panel">
+    <h2>2. 圖片與辨識文字</h2>
+    <p class="notice">辨識結果可能有誤，請檢查數字。你可以直接修改文字，再產生報告。</p>
+    <div id="items"><p class="muted">上傳圖片後會顯示在這裡。</p></div>
+  </section>
+
+  <section class="panel">
+    <h2>3. 結構化訓練報告</h2>
+    <label class="field">運動類型
+      <select id="sport">
+        <option value="自動判斷">自動判斷</option>
+        <option value="自行車">自行車</option>
+        <option value="跑步">跑步</option>
+        <option value="游泳">游泳</option>
+      </select>
+    </label>
+    <div class="actions">
+      <button id="copyReport">複製報告</button>
+    </div>
+    <pre id="report">尚未產生報告。</pre>
+  </section>
+
+  <p class="notice">隱私提醒：圖片不會由本頁上傳到你的伺服器，但 OCR 程式和語言資料會從 CDN 載入。請勿在公開 GitHub 儲存庫提交私人訓練截圖。</p>
+</main>
+
+<script>
+  const fileInput = document.getElementById("files");
+  const itemsEl = document.getElementById("items");
+  const countEl = document.getElementById("count");
+  const statusEl = document.getElementById("globalStatus");
+  const barEl = document.getElementById("bar");
+  const reportEl = document.getElementById("report");
+  let items = [];
+  let nextId = 1;
+
+  fileInput.addEventListener("change", (event) => {
+    const files = Array.from(event.target.files || []);
+    const remaining = 20 - items.length;
+    if (remaining <= 0) {
+      alert("最多只能加入 20 張圖片。");
+      fileInput.value = "";
+      return;
+    }
+
+    files.slice(0, remaining).forEach(file => {
+      if (!file.type.startsWith("image/")) return;
+      items.push({
+        id: nextId++,
+        file,
+        url: URL.createObjectURL(file),
+        name: file.name,
+        text: "",
+        status: "尚未辨識"
+      });
+    });
+
+    if (files.length > remaining) {
+      alert("最多只能加入 20 張，已加入剩餘可用數量。");
+    }
+    fileInput.value = "";
+    renderItems();
+  });
+
+  function renderItems() {
+    countEl.textContent = `已加入 ${items.length} / 20 張圖片`;
+    if (!items.length) {
+      itemsEl.innerHTML = '<p class="muted">上傳圖片後會顯示在這裡。</p>';
+      return;
+    }
+
+    itemsEl.replaceChildren();
+    items.forEach(item => {
+      const card = document.createElement("div");
+      card.className = "item";
+
+      const head = document.createElement("div");
+      head.className = "item-head";
+      const title = document.createElement("strong");
+      title.textContent = item.name;
+      const status = document.createElement("span");
+      status.className = "status";
+      status.textContent = item.status;
+      head.append(title, status);
+
+      const img = document.createElement("img");
+      img.src = item.url;
+      img.alt = item.name;
+
+      const label = document.createElement("label");
+      label.textContent = "OCR 辨識文字（可手動修改）";
+      label.className = "field";
+
+      const textarea = document.createElement("textarea");
+      textarea.value = item.text;
+      textarea.placeholder = "辨識完成後，文字會顯示在這裡……";
+      textarea.addEventListener("input", () => { item.text = textarea.value; });
+
+      const remove = document.createElement("button");
+      remove.className = "danger";
+      remove.textContent = "移除此圖片";
+      remove.addEventListener("click", () => {
+        URL.revokeObjectURL(item.url);
+        items = items.filter(x => x.id !== item.id);
+        renderItems();
+      });
+
+      card.append(head, img, label, textarea, remove);
+      itemsEl.append(card);
+    });
+  }
+
+  document.getElementById("runOCR").addEventListener("click", async () => {
+    if (!items.length) {
+      alert("請先選擇圖片。");
+      return;
+    }
+    if (!window.Tesseract) {
+      statusEl.textContent = "OCR 程式載入失敗，請確認網路連線後重新整理頁面。";
+      return;
+    }
+
+    const button = document.getElementById("runOCR");
+    button.disabled = true;
+    try {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        item.status = "辨識中……";
+        renderItems();
+        statusEl.textContent = `正在辨識第 ${i + 1} / ${items.length} 張圖片……`;
+        barEl.style.width = `${Math.round(i / items.length * 100)}%`;
+
+        try {
+          const result = await Tesseract.recognize(item.file, "chi_tra+eng", {
+            logger: message => {
+              if (message.status === "recognizing text") {
+                statusEl.textContent = `第 ${i + 1} 張：辨識中 ${Math.round((message.progress || 0) * 100)}%`;
+              }
+            }
+          });
+          item.text = result.data.text.trim();
+          item.status = item.text ? "辨識完成，請核對" : "未辨識到文字";
+        } catch (error) {
+          item.status = "辨識失敗";
+          item.text = item.text || "辨識失敗。請檢查網路，或手動輸入訓練數據。";
+        }
+        renderItems();
+        barEl.style.width = `${Math.round((i + 1) / items.length * 100)}%`;
+      }
+      statusEl.textContent = "所有圖片處理完成。請檢查辨識結果，再產生報告。";
+    } catch (error) {
+      statusEl.textContent = "處理過程發生錯誤，請重新嘗試。";
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  function inferSport(text) {
+    if (/游泳|泳姿|划水|泳池|每 100 公尺|每100公尺|swim|泳距/i.test(text)) return "游泳";
+    if (/跑步|步頻|步幅|每公里|配速|running|cadence/i.test(text)) return "跑步";
+    if (/自行車|單車|騎乘|踏頻|功率|瓦特|cycling|bike|FTP/i.test(text)) return "自行車";
+    return "未判定";
+  }
+
+  function firstMatch(text, patterns) {
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match && match[1]) return match[1].trim();
+    }
+    return "";
+  }
+
+  function extractMetrics(text) {
+    const lines = text.split(/\n+/).map(s => s.trim()).filter(Boolean);
+    const result = {};
+    const patterns = [
+      ["日期", [/日期\s*[:：]?\s*([0-9]{4}[/-][0-9]{1,2}[/-][0-9]{1,2})/i, /(\d{4}[/-]\d{1,2}[/-]\d{1,2})/]],
+      ["距離", [/距離\s*[:：]?\s*([\d.,]+\s*(?:km|公里|公尺|m|mi|英里))/i, /([\d.,]+\s*(?:km|公里|mi|英里))/i]],
+      ["運動時間", [/(?:總時間|運動時間|時間|time|duration)\s*[:：]?\s*([\d:時分秒.]+)/i]],
+      ["平均心率", [/(?:平均心率|平均心跳|avg\.?\s*hr|平均 HR)\s*[:：]?\s*(\d{2,3})\s*(?:bpm)?/i]],
+      ["最高心率", [/(?:最高心率|最大心率|max\.?\s*hr|最大 HR)\s*[:：]?\s*(\d{2,3})\s*(?:bpm)?/i]],
+      ["平均功率", [/(?:平均功率|平均瓦數|avg\.?\s*power)\s*[:：]?\s*(\d{2,3})\s*(?:w|瓦)?/i]],
+      ["最大功率", [/(?:最大功率|最高功率|max\.?\s*power)\s*[:：]?\s*(\d{2,4})\s*(?:w|瓦)?/i]],
+      ["標準化功率 NP", [/(?:標準化功率|NP)\s*[:：]?\s*(\d{2,3})\s*(?:w|瓦)?/i]],
+      ["爬升高度", [/(?:總爬升|爬升高度|總上升|elevation gain)\s*[:：]?\s*([\d,]+)\s*(?:m|公尺)?/i]],
+      ["平均速度", [/(?:平均速度|avg\.?\s*speed)\s*[:：]?\s*([\d.]+\s*(?:km\/h|公里\/小時)?)/i]],
+      ["平均配速", [/(?:平均配速|配速|pace)\s*[:：]?\s*([\d:]+\s*(?:\/km|\/公里)?)/i]],
+      ["卡路里", [/(?:卡路里|消耗熱量|熱量|calories)\s*[:：]?\s*([\d,]+)\s*(?:kcal|大卡)?/i]],
+      ["訓練效果", [/(?:訓練效果|有氧訓練效果|training effect)\s*[:：]?\s*([\d.]+)/i]]
+    ];
+
+    for (const [label, regexes] of patterns) {
+      const value = firstMatch(text, regexes);
+      if (value) result[label] = value;
+    }
+
+    if (!Object.keys(result).length && lines.length) {
+      result["辨識文字摘要"] = lines.slice(0, 8).join("；");
+    }
+    return result;
+  }
+
+  function createReport() {
+    if (!items.length) {
+      reportEl.textContent = "請先上傳圖片並辨識文字。";
+      return;
+    }
+
+    const chosenSport = document.getElementById("sport").value;
+    const allText = items.map(x => x.text).filter(Boolean).join("\n");
+    const sport = chosenSport === "自動判斷" ? inferSport(allText) : chosenSport;
+    const metrics = extractMetrics(allText);
+
+    const output = [
+      "# Garmin 訓練紀錄整理",
+      "",
+      `運動類型：${sport}`,
+      `圖片數量：${items.length}`,
+      `整理日期：${new Date().toLocaleDateString("zh-TW")}`,
+      "",
+      "## 擷取到的數據",
+      ...(
+        Object.keys(metrics).length
+          ? Object.entries(metrics).map(([key, value]) => `- ${key}：${value}`)
+          : ["- 尚未擷取到明確數據，請檢查下方原始辨識文字。"]
+      ),
+      "",
+      "## 各圖片原始辨識文字",
+      ...items.map((item, i) => `### 圖片 ${i + 1}：${item.name}\n${item.text || "（無文字）"}`),
+      "",
+      "## 注意事項",
+      "- OCR 數值可能有誤，請對照原始 Garmin 截圖確認。",
+      "- 同一項數據可能在不同圖片重複出現；請勿直接將重複數據相加。",
+      "- 空白欄位代表未能可靠擷取，不代表數值為零。"
+    ].join("\n");
+
+    reportEl.textContent = output;
+  }
+
+  document.getElementById("makeReport").addEventListener("click", createReport);
+
+  document.getElementById("copyReport").addEventListener("click", async () => {
+    const text = reportEl.textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      statusEl.textContent = "報告已複製，可以貼到 ChatGPT。";
+    } catch (error) {
+      const range = document.createRange();
+      range.selectNodeContents(reportEl);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      statusEl.textContent = "無法自動複製，已選取報告文字，請手動複製。";
+    }
+  });
+
+  document.getElementById("clearAll").addEventListener("click", () => {
+    if (!confirm("確定要清空所有圖片與辨識文字嗎？")) return;
+    items.forEach(item => URL.revokeObjectURL(item.url));
+    items = [];
+    barEl.style.width = "0%";
+    statusEl.textContent = "已清空。";
+    reportEl.textContent = "尚未產生報告。";
+    renderItems();
+  });
+
+  renderItems();
+</script>
+</body>
+</html>
